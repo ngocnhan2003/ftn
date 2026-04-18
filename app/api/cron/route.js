@@ -1,12 +1,12 @@
 // /api/keep-alive.ts
 export default async function handler(req, res) {
   const response = await fetch(
-    "https://lxdritisntmsmbuclkwt.supabase.co/rest/v1/rpc/keep_alive",
+    `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/rpc/keep_alive`,
     {
       method: "POST",
       headers: {
-        apikey: process.env.SUPABASE_KEY,
-        Authorization: `Bearer ${process.env.SUPABASE_KEY}`,
+        apikey: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY,
+        Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY}`,
       },
     }
   );
