@@ -49,9 +49,9 @@ export default function LandingHero({ siteName }: LandingHeroProps) {
         >
           <motion.div
             whileHover={{ scale: 1.05 }}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold text-amber-800 bg-white/60 backdrop-blur-md rounded-full shadow-[0_2px_10px_-3px_rgba(0,0,0,0.1)] border border-amber-200/50 relative overflow-hidden group"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold text-amber-800 bg-white/60 rounded-full shadow-[0_2px_10px_-3px_rgba(0,0,0,0.1)] border border-amber-200/50 relative overflow-hidden group"
           >
-            <Sparkles className="w-4 h-4 text-amber-500" />
+            <Sparkles className="size-4 text-amber-500" />
             Nền tảng gia phả hiện đại & bảo mật
             <div className="absolute inset-0 bg-linear-to-r from-transparent via-white/50 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000 ease-in-out"></div>
           </motion.div>
@@ -75,11 +75,11 @@ export default function LandingHero({ siteName }: LandingHeroProps) {
 
           <Link
             href="/login"
-            className="group inline-flex items-center justify-center gap-2 px-8 py-4 sm:px-10 sm:py-5 text-base sm:text-lg font-bold text-white bg-stone-900 border border-stone-800 hover:bg-stone-800 hover:border-stone-700 rounded-2xl shadow-xl shadow-stone-900/10 hover:shadow-2xl hover:shadow-stone-900/20 transition-all duration-300 hover:-translate-y-1 active:translate-y-0 cursor-pointer w-full sm:w-auto overflow-hidden relative"
+            className="group inline-flex items-center justify-center gap-2 px-8 py-4 sm:px-10 sm:py-5 text-base sm:text-lg font-bold text-white bg-primary border border-stone-800 hover:bg-stone-800 hover:border-stone-700 rounded-xl shadow-xl shadow-stone-900/10 hover:shadow-2xl hover:shadow-stone-900/20 transition-all duration-300 hover:-translate-y-1 active:translate-y-0 w-full sm:w-auto overflow-hidden relative"
           >
             <span className="relative z-10 flex items-center gap-3">
               Đăng nhập để xem thông tin
-              <ArrowRight className="w-5 h-5 group-hover:translate-x-1.5 transition-transform" />
+              <ArrowRight className="size-5 group-hover:translate-x-1.5 transition-transform" />
             </span>
           </Link>
         </motion.div>
@@ -90,17 +90,17 @@ export default function LandingHero({ siteName }: LandingHeroProps) {
         >
           {[
             {
-              icon: <Users className="w-6 h-6 text-amber-700" />,
+              icon: <Users className="size-6 text-amber-700" />,
               title: "Quản lý Thành viên",
               desc: "Cập nhật thông tin chi tiết, tiểu sử và hình ảnh của từng thành viên trong dòng họ một cách nhanh chóng và bảo mật.",
             },
             {
-              icon: <Network className="w-6 h-6 text-amber-700" />,
+              icon: <Network className="size-6 text-amber-700" />,
               title: "Sơ đồ Sáng tạo",
               desc: "Xem trực quan sơ đồ phả hệ, thế hệ và mối quan hệ gia đình với giao diện cây hiện đại, dễ thao tác.",
             },
             {
-              icon: <ShieldCheck className="w-6 h-6 text-amber-700" />,
+              icon: <ShieldCheck className="size-6 text-amber-700" />,
               title: "Bảo mật Tối đa",
               desc: "Dữ liệu riêng tư như số điện thoại, quê quán được phân quyền chặt chẽ, bảo vệ an toàn trên hệ thống đám mây.",
             },
@@ -109,7 +109,7 @@ export default function LandingHero({ siteName }: LandingHeroProps) {
               key={idx}
               variants={fadeIn}
               whileHover={{ y: -5 }}
-              className="bg-white/70 backdrop-blur-xl p-8 rounded-3xl border border-white/80 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_20px_40px_rgb(0,0,0,0.08)] hover:bg-white transition-all duration-500 flex flex-col items-start group relative overflow-hidden"
+              className="card-feature flex flex-col items-start group relative overflow-hidden"
             >
               <div className="absolute top-0 right-0 w-32 h-32 bg-linear-to-br from-amber-100/50 to-transparent rounded-bl-[100px] opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
 

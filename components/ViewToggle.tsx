@@ -1,18 +1,35 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { List, ListTree, Network } from "lucide-react";
-import { useDashboard } from "./DashboardContext";
+import { Circle, List, ListTree, Network } from "lucide-react";
+import { useMemberListView } from "@/context/MemberListContext";
 
-export type ViewMode = "list" | "tree" | "mindmap";
+export type ViewMode = "list" | "tree" | "mindmap" | "bubble";
 
 export default function ViewToggle() {
-  const { view: currentView, setView } = useDashboard();
+  const { view: currentView, setView } = useMemberListView();
 
   const tabs = [
-    { id: "list", label: "Danh sách", icon: <List className="size-4" /> },
-    { id: "tree", label: "Sơ đồ cây", icon: <Network className="size-4" /> },
-    { id: "mindmap", label: "Mindmap", icon: <ListTree className="size-4" /> },
+    {
+      id: "list",
+      label: "Danh sách",
+      icon: <List className="size-6 sm:size-4" />,
+    },
+    {
+      id: "tree",
+      label: "Sơ đồ cây",
+      icon: <Network className="size-6 sm:size-4" />,
+    },
+    {
+      id: "mindmap",
+      label: "Mindmap",
+      icon: <ListTree className="size-6 sm:size-4" />,
+    },
+    {
+      id: "bubble",
+      label: "Bong bóng",
+      icon: <Circle className="size-6 sm:size-4" />,
+    },
   ] as const;
 
   return (
@@ -23,11 +40,10 @@ export default function ViewToggle() {
           <button
             key={tab.id}
             onClick={() => setView(tab.id as ViewMode)}
-            className={`relative px-4 sm:px-6 py-1.5 sm:py-2.5 text-sm font-semibold rounded-full transition-colors duration-300 ease-in-out cursor-pointer z-10 flex items-center gap-2 ${
-              isActive
-                ? "text-stone-900"
-                : "text-stone-500 hover:text-stone-800"
-            }`}
+            className={`relative px-4 sm:px-6 py-1.5 sm:py-2.5 text-sm font-semibold rounded-full transition-colors duration-300 ease-in-out z-10 flex items-center gap-2 ${isActive
+              ? "text-stone-900"
+              : "text-stone-500 hover:text-stone-800"
+              }`}
           >
             {isActive && (
               <motion.div
@@ -41,7 +57,7 @@ export default function ViewToggle() {
             >
               {tab.icon}
             </span>
-            <span className="tracking-wide">{tab.label}</span>
+            <span className="hidden sm:block tracking-wide">{tab.label}</span>
           </button>
         );
       })}

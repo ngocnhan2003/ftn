@@ -1,12 +1,20 @@
 "use client";
 
+import config from "@/app/config";
 import Footer from "@/components/Footer";
 import { createClient } from "@/utils/supabase/client";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeft, KeyRound, Mail, Shield, UserPlus } from "lucide-react";
+import {
+  ArrowLeft,
+  Info,
+  KeyRound,
+  Mail,
+  Shield,
+  UserPlus,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -18,7 +26,7 @@ export default function LoginPage() {
   useEffect(() => {
     if (typeof window !== "undefined") {
       const hostname = window.location.hostname;
-      if (hostname === "localhost" || hostname === "giapha-os.homielab.com") {
+      if (hostname === config.demoDomain) {
         setIsDemo(true);
         setEmail("giaphaos@homielab.com");
         setPassword("giaphaos");
@@ -27,7 +35,7 @@ export default function LoginPage() {
   }, []);
 
   const router = useRouter();
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [isLogin, setIsLogin] = useState(true);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -59,24 +67,51 @@ export default function LoginPage() {
           return;
         }
 
+        // 1. Try to sign up
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
         });
 
         if (error) {
+          // Check if error is related to missing database schema/tables
+          if (
+            error.message.includes("relation") &&
+            error.message.includes("does not exist")
+          ) {
+            router.push("/setup");
+            return;
+          }
+
           setError(error.message);
         } else if (data.user?.identities && data.user.identities.length === 0) {
           setError(
             "Email này đã được đăng ký. Vui lòng đăng nhập hoặc dùng email khác.",
           );
         } else {
-          setSuccessMessage(
-            "Đăng ký thành công tài khoản bạn cần chờ admin kích hoạt để có thể xem nội dung.",
-          );
-          setIsLogin(true); // Switch back to login view or just leave success message
-          setConfirmPassword(""); // clear confirm password
-          setPassword(""); // clear password
+          if (data.session) {
+            router.push("/dashboard");
+            router.refresh();
+          } else {
+            // Attempt to sign in immediately (catches auto-confirmed first admin)
+            const { data: signInData, error: signInError } =
+              await supabase.auth.signInWithPassword({
+                email,
+                password,
+              });
+
+            if (!signInError && signInData.session) {
+              router.push("/dashboard");
+              router.refresh();
+            } else {
+              setSuccessMessage(
+                "Đăng ký thành công! Vui lòng chờ admin kích hoạt tài khoản để xem nội dung.",
+              );
+              setIsLogin(true); // Switch back to login view
+              setConfirmPassword(""); // clear confirm password
+              setPassword(""); // clear password
+            }
+          }
         }
       }
     } catch (err) {
@@ -112,7 +147,7 @@ export default function LoginPage() {
               href="/"
               className="inline-flex items-center justify-center p-3.5 bg-white rounded-2xl mb-5 shadow-sm ring-1 ring-stone-100 hover:scale-105 hover:shadow-md transition-all duration-300"
             >
-              <Shield className="w-8 h-8 text-amber-600" />
+              <Shield className="size-8 text-amber-600" />
             </Link>
             <h2 className="text-3xl sm:text-4xl font-serif font-bold text-stone-900 tracking-tight">
               {isLogin ? "Đăng nhập" : "Đăng ký"}
@@ -145,14 +180,14 @@ export default function LoginPage() {
                   Email
                 </label>
                 <div className="relative flex items-center group">
-                  <Mail className="absolute left-3.5 w-5 h-5 text-stone-400 group-focus-within:text-amber-500 transition-colors" />
+                  <Mail className="absolute left-3.5 size-5 text-stone-400 group-focus-within:text-amber-500 transition-colors" />
                   <input
                     id="email-address"
                     name="email"
                     type="email"
                     autoComplete="email"
                     required
-                    className="bg-white/50 backdrop-blur-sm text-stone-900 placeholder-stone-400 block w-full rounded-xl border border-stone-200/80 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)] focus:border-amber-400 focus:ring-amber-400 focus:bg-white pl-11 pr-4 py-3.5 transition-all duration-200 outline-none"
+                    className="bg-white/50 text-stone-900 placeholder-stone-400 block w-full rounded-xl border border-stone-200/80 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)] focus:border-amber-400 focus:ring-amber-400 focus:bg-white pl-11 pr-4 py-3.5 transition-all duration-200 outline-none"
                     placeholder="name@example.com"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -168,14 +203,14 @@ export default function LoginPage() {
                   Mật khẩu
                 </label>
                 <div className="relative flex items-center group">
-                  <KeyRound className="absolute left-3.5 w-5 h-5 text-stone-400 group-focus-within:text-amber-500 transition-colors" />
+                  <KeyRound className="absolute left-3.5 size-5 text-stone-400 group-focus-within:text-amber-500 transition-colors" />
                   <input
                     id="password"
                     name="password"
                     type="password"
                     autoComplete={isLogin ? "current-password" : "new-password"}
                     required
-                    className="bg-white/50 backdrop-blur-sm text-stone-900 placeholder-stone-400 block w-full rounded-xl border border-stone-200/80 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)] focus:border-amber-400 focus:ring-amber-400 focus:bg-white pl-11 pr-4 py-3.5 transition-all duration-200 outline-none"
+                    className="bg-white/50 text-stone-900 placeholder-stone-400 block w-full rounded-xl border border-stone-200/80 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)] focus:border-amber-400 focus:ring-amber-400 focus:bg-white pl-11 pr-4 py-3.5 transition-all duration-200 outline-none"
                     placeholder="Nhập mật khẩu"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -199,14 +234,14 @@ export default function LoginPage() {
                       Xác nhận mật khẩu
                     </label>
                     <div className="relative flex items-center group">
-                      <KeyRound className="absolute left-3.5 w-5 h-5 text-stone-400 group-focus-within:text-amber-500 transition-colors" />
+                      <KeyRound className="absolute left-3.5 size-5 text-stone-400 group-focus-within:text-amber-500 transition-colors" />
                       <input
                         id="confirmPassword"
                         name="confirmPassword"
                         type="password"
                         autoComplete="new-password"
                         required={!isLogin}
-                        className="bg-white/50 backdrop-blur-sm text-stone-900 placeholder-stone-400 block w-full rounded-xl border border-stone-200/80 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)] focus:border-amber-400 focus:ring-amber-400 focus:bg-white pl-11 pr-4 py-3.5 transition-all duration-200 outline-none"
+                        className="bg-white/50 text-stone-900 placeholder-stone-400 block w-full rounded-xl border border-stone-200/80 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)] focus:border-amber-400 focus:ring-amber-400 focus:bg-white pl-11 pr-4 py-3.5 transition-all duration-200 outline-none"
                         placeholder="Nhập lại mật khẩu"
                         value={confirmPassword}
                         onChange={(e) => setConfirmPassword(e.target.value)}
@@ -273,7 +308,7 @@ export default function LoginPage() {
                 ) : (
                   <>
                     {isLogin ? "Đăng nhập" : "Tạo tài khoản"}
-                    {!isLogin && <UserPlus className="w-4 h-4 ml-1" />}
+                    {!isLogin && <UserPlus className="size-4 ml-1" />}
                   </>
                 )}
               </button>
@@ -289,6 +324,12 @@ export default function LoginPage() {
               <button
                 type="button"
                 onClick={() => {
+                  if (isLogin && isDemo) {
+                    setError(
+                      "Đây là trang demo, bạn không cần phải tạo tài khoản. Hãy sử dụng tài khoản demo để truy cập với toàn bộ quyền.",
+                    );
+                    return;
+                  }
                   setIsLogin(!isLogin);
                   setError(null);
                   setSuccessMessage(null);
@@ -306,10 +347,18 @@ export default function LoginPage() {
 
       <Link
         href="/"
-        className="absolute top-6 left-6 z-20 flex items-center gap-2 text-stone-500 hover:text-stone-900 font-semibold text-sm transition-all duration-300 group bg-white/60 px-5 py-2.5 rounded-full backdrop-blur-md shadow-sm border border-stone-200 hover:border-stone-300 hover:shadow-md"
+        className="absolute top-6 left-6 z-20 flex items-center gap-2 text-stone-500 hover:text-stone-900 font-semibold text-sm transition-all duration-300 group bg-white/60 px-5 py-2.5 rounded-full shadow-sm border border-stone-200 hover:border-stone-300 hover:shadow-md"
       >
-        <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+        <ArrowLeft className="size-4 group-hover:-translate-x-1 transition-transform" />
         Trang chủ
+      </Link>
+
+      <Link
+        href="/about"
+        className="absolute top-6 right-6 z-20 flex items-center gap-2 text-stone-500 hover:text-stone-900 font-semibold text-sm transition-all duration-300 group bg-white/60 px-5 py-2.5 rounded-full shadow-sm border border-stone-200 hover:border-stone-300 hover:shadow-md"
+      >
+        <Info className="size-4 group-hover:scale-110 transition-transform" />
+        Giới thiệu
       </Link>
 
       <Footer className="bg-transparent relative z-10 border-none mt-auto" />

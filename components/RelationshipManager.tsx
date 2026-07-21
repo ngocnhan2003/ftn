@@ -1,8 +1,9 @@
 "use client";
 
-import { DashboardContext, useDashboard } from "@/components/DashboardContext";
+import { MemberListContext, useMemberListView } from "@/context/MemberListContext";
 import { Person, RelationshipType } from "@/types";
 import { formatDisplayDate } from "@/utils/dateHelpers";
+import { getAvatarBg } from "@/utils/styleHelprs";
 import { createClient } from "@/utils/supabase/client";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
@@ -10,9 +11,18 @@ import { useCallback, useContext, useEffect, useState } from "react";
 import DefaultAvatar from "./DefaultAvatar";
 
 interface RelationshipManagerProps {
-  personId: string;
+  person: Person;
   isAdmin: boolean;
-  personGender: string; // Passed down to calculate default spouse gender
+  canEdit?: boolean;
+  onStatsLoaded?: (stats: {
+    biologicalChildren: number;
+    maleBiologicalChildren: number;
+    femaleBiologicalChildren: number;
+    paternalGrandchildren: number;
+    maternalGrandchildren: number;
+    sonInLaw: number;
+    daughterInLaw: number;
+  }) => void;
 }
 
 interface EnrichedRelationship {
@@ -24,18 +34,22 @@ interface EnrichedRelationship {
 }
 
 export default function RelationshipManager({
-  personId,
+  person,
   isAdmin,
-  personGender,
+  canEdit = false,
+  onStatsLoaded,
 }: RelationshipManagerProps) {
   const supabase = createClient();
-  const dashboardContext = useContext(DashboardContext);
-  const { setMemberModalId } = useDashboard();
+  const memberListContext = useContext(MemberListContext);
+  const { setMemberModalId } = useMemberListView();
   const router = useRouter();
+
+  const personId = person.id;
+  const personGender = person.gender;
 
   // If inside DashboardProvider → open modal; otherwise → navigate to full page
   const handlePersonClick = (id: string) => {
-    if (dashboardContext !== undefined) {
+    if (memberListContext !== undefined) {
       setMemberModalId(id);
     } else {
       router.push(`/dashboard/members/${id}`);
@@ -60,6 +74,7 @@ export default function RelationshipManager({
   const [recentMembers, setRecentMembers] = useState<Person[]>([]);
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Bulk Add State
   const [isAddingBulk, setIsAddingBulk] = useState(false);
@@ -69,9 +84,18 @@ export default function RelationshipManager({
       name: string;
       gender: "male" | "female" | "other";
       birthYear: string;
+      birthOrder: string;
       isProcessing: boolean;
     }[]
-  >([{ name: "", gender: "male", birthYear: "", isProcessing: false }]);
+  >([
+    {
+      name: "",
+      gender: "male",
+      birthYear: "",
+      birthOrder: "1",
+      isProcessing: false,
+    },
+  ]);
 
   // Quick Add Spouse State
   const [isAddingSpouse, setIsAddingSpouse] = useState(false);
@@ -175,13 +199,79 @@ export default function RelationshipManager({
         }
       }
 
+      if (onStatsLoaded) {
+        const biologicalChildrenList = formattedRels.filter(
+          (r) => r.direction === "child" && r.type === "biological_child",
+        );
+        const biologicalChildren = biologicalChildrenList.length;
+        const maleBiologicalChildren = biologicalChildrenList.filter(
+          (c) => c.targetPerson.gender === "male",
+        ).length;
+        const femaleBiologicalChildren = biologicalChildrenList.filter(
+          (c) => c.targetPerson.gender === "female",
+        ).length;
+
+        const daughterInLaw = formattedRels.filter(
+          (r) =>
+            r.direction === "child_in_law" &&
+            r.targetPerson.gender === "female",
+        ).length;
+        const sonInLaw = formattedRels.filter(
+          (r) =>
+            r.direction === "child_in_law" && r.targetPerson.gender === "male",
+        ).length;
+
+        // Fetch Grandchildren mapping
+        let paternalGrandchildren = 0;
+        let maternalGrandchildren = 0;
+        if (childrenIds.length > 0) {
+          const { data: grandchildrenData } = await supabase
+            .from("relationships")
+            .select("id, person_a")
+            .in("type", ["biological_child", "adopted_child"])
+            .in("person_a", childrenIds);
+
+          if (grandchildrenData) {
+            const maleChildrenIds = formattedRels
+              .filter(
+                (r) =>
+                  r.direction === "child" && r.targetPerson.gender === "male",
+              )
+              .map((r) => r.targetPerson.id);
+            const femaleChildrenIds = formattedRels
+              .filter(
+                (r) =>
+                  r.direction === "child" && r.targetPerson.gender === "female",
+              )
+              .map((r) => r.targetPerson.id);
+
+            paternalGrandchildren = grandchildrenData.filter((g) =>
+              maleChildrenIds.includes(g.person_a),
+            ).length;
+            maternalGrandchildren = grandchildrenData.filter((g) =>
+              femaleChildrenIds.includes(g.person_a),
+            ).length;
+          }
+        }
+
+        onStatsLoaded({
+          biologicalChildren,
+          maleBiologicalChildren,
+          femaleBiologicalChildren,
+          paternalGrandchildren,
+          maternalGrandchildren,
+          sonInLaw,
+          daughterInLaw,
+        });
+      }
+
       setRelationships(formattedRels);
     } catch (err) {
       console.error("Error fetching relationships:", err);
     } finally {
       setLoading(false);
     }
-  }, [personId, supabase]);
+  }, [personId, supabase, onStatsLoaded]);
 
   useEffect(() => {
     fetchRelationships();
@@ -228,6 +318,7 @@ export default function RelationshipManager({
   const handleAddRelationship = async () => {
     if (!selectedTargetId) return;
     setProcessing(true);
+    setError(null);
 
     try {
       let personA = personId;
@@ -265,14 +356,57 @@ export default function RelationshipManager({
 
       if (error) throw error;
 
+      // Auto-update target person generation and is_in_law if currently missing
+      try {
+        const { data: targetPerson } = await supabase
+          .from("persons")
+          .select("generation, is_in_law")
+          .eq("id", selectedTargetId)
+          .single();
+
+        if (
+          targetPerson &&
+          (targetPerson.generation == null || targetPerson.is_in_law == null)
+        ) {
+          const updates: { generation?: number; is_in_law?: boolean } = {};
+
+          if (targetPerson.generation == null && person.generation != null) {
+            if (newRelDirection === "child")
+              updates.generation = person.generation + 1;
+            else if (newRelDirection === "parent")
+              updates.generation = person.generation - 1;
+            else if (newRelDirection === "spouse")
+              updates.generation = person.generation;
+          }
+
+          if (targetPerson.is_in_law == null) {
+            if (newRelDirection === "child" || newRelDirection === "parent")
+              updates.is_in_law = false;
+            else if (newRelDirection === "spouse")
+              updates.is_in_law = person.is_in_law === true ? false : true;
+          }
+
+          if (Object.keys(updates).length > 0) {
+            await supabase
+              .from("persons")
+              .update(updates)
+              .eq("id", selectedTargetId);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to auto-update target person properties", err);
+      }
+
       setIsAdding(false);
       setSearchTerm("");
       setSelectedTargetId(null);
       setNewRelNote("");
       fetchRelationships();
+      router.refresh();
     } catch (err: unknown) {
       const e = err as Error;
-      alert("Failed to add relationship: " + e.message);
+      setError("Không thể thêm mối quan hệ: " + e.message);
+      setTimeout(() => setError(null), 5000);
     } finally {
       setProcessing(false);
     }
@@ -282,11 +416,13 @@ export default function RelationshipManager({
     // Filter out rows without a name
     const validChildren = bulkChildren.filter((c) => c.name.trim() !== "");
     if (validChildren.length === 0) {
-      alert("Vui lòng nhập ít nhất tên của 1 người con.");
+      setError("Vui lòng nhập ít nhất tên của 1 người con.");
+      setTimeout(() => setError(null), 5000);
       return;
     }
 
     setProcessing(true);
+    setError(null);
     let successCount = 0;
 
     try {
@@ -299,13 +435,25 @@ export default function RelationshipManager({
           full_name: string;
           gender: "male" | "female" | "other";
           birth_year?: number;
+          birth_order?: number;
+          is_in_law?: boolean;
+          generation?: number;
         } = {
           full_name: child.name.trim(),
           gender: child.gender,
+          is_in_law: false,
         };
+
+        if (person.generation != null) {
+          personPayload.generation = person.generation + 1;
+        }
         if (child.birthYear.trim() !== "") {
           const year = parseInt(child.birthYear);
           if (!isNaN(year)) personPayload.birth_year = year;
+        }
+        if (child.birthOrder.trim() !== "") {
+          const order = parseInt(child.birthOrder);
+          if (!isNaN(order)) personPayload.birth_order = order;
         }
 
         const { data: newPersonData, error: insertError } = await supabase
@@ -343,19 +491,29 @@ export default function RelationshipManager({
       if (successCount === validChildren.length) {
         setIsAddingBulk(false);
         setBulkChildren([
-          { name: "", gender: "male", birthYear: "", isProcessing: false },
+          {
+            name: "",
+            gender: "male",
+            birthYear: "",
+            birthOrder: "1",
+            isProcessing: false,
+          },
         ]);
         setSelectedSpouseId("");
         fetchRelationships();
+        router.refresh();
       } else {
-        alert(
+        setError(
           `Đã xảy ra lỗi. Chỉ lưu thành công ${successCount}/${validChildren.length} người.`,
         );
+        setTimeout(() => setError(null), 5000);
         fetchRelationships();
+        router.refresh();
       }
     } catch (err: unknown) {
       const e = err as Error;
-      alert("Failed to add bulk children: " + e.message);
+      setError("Không thể thêm danh sách con: " + e.message);
+      setTimeout(() => setError(null), 5000);
     } finally {
       setProcessing(false);
     }
@@ -363,11 +521,13 @@ export default function RelationshipManager({
 
   const handleQuickAddSpouse = async () => {
     if (!newSpouseName.trim()) {
-      alert("Vui lòng nhập tên Vợ/Chồng.");
+      setError("Vui lòng nhập tên Vợ/Chồng.");
+      setTimeout(() => setError(null), 5000);
       return;
     }
 
     setProcessing(true);
+    setError(null);
     try {
       // Determine default gender based on current person defined in personGender prop
       // Default to opposite. If original is other, default to female (arbitrary choice, or let user pick, but standard says opposite)
@@ -382,10 +542,17 @@ export default function RelationshipManager({
         full_name: string;
         gender: "male" | "female" | "other";
         birth_year?: number;
+        is_in_law?: boolean;
+        generation?: number;
       } = {
         full_name: newSpouseName.trim(),
         gender: newSpouseGender,
+        is_in_law: person.is_in_law === true ? false : true,
       };
+
+      if (person.generation != null) {
+        personPayload.generation = person.generation;
+      }
 
       if (newSpouseBirthYear.trim() !== "") {
         const year = parseInt(newSpouseBirthYear);
@@ -418,9 +585,11 @@ export default function RelationshipManager({
       setNewSpouseBirthYear("");
       setNewSpouseNote("");
       fetchRelationships();
+      router.refresh();
     } catch (err: unknown) {
       const e = err as Error;
-      alert("Failed to quick add spouse: " + e.message);
+      setError("Không thể thêm vợ/chồng: " + e.message);
+      setTimeout(() => setError(null), 5000);
     } finally {
       setProcessing(false);
     }
@@ -435,14 +604,25 @@ export default function RelationshipManager({
         .eq("id", relId);
       if (error) throw error;
       fetchRelationships();
+      router.refresh();
     } catch (err: unknown) {
       const e = err as Error;
-      alert("Failed to delete: " + e.message);
+      setError("Không thể xóa: " + e.message);
+      setTimeout(() => setError(null), 5000);
     }
   };
 
   const groupByType = (type: string) =>
-    relationships.filter((r) => r.direction === type);
+    relationships
+      .filter((r) => r.direction === type)
+      .sort((a, b) => {
+        const yearA = a.targetPerson.birth_year;
+        const yearB = b.targetPerson.birth_year;
+        if (yearA == null && yearB == null) return 0;
+        if (yearA == null) return 1;
+        if (yearB == null) return -1;
+        return yearA - yearB;
+      });
 
   if (loading)
     return (
@@ -481,11 +661,11 @@ export default function RelationshipManager({
                   >
                     <button
                       onClick={() => handlePersonClick(rel.targetPerson.id)}
-                      className="flex items-center gap-3 hover:bg-stone-100 p-2.5 -mx-2.5 rounded-xl transition-all duration-200 flex-1 text-left cursor-pointer"
+                      className="flex items-center gap-3 hover:bg-stone-100 p-2.5 -mx-2.5 rounded-xl transition-all duration-200 flex-1 text-left"
                     >
                       <div
-                        className={`h-8 w-8 rounded-full flex items-center justify-center text-xs text-white overflow-hidden
-                            ${rel.targetPerson.gender === "male" ? "bg-sky-700" : rel.targetPerson.gender === "female" ? "bg-rose-700" : "bg-stone-500"}`}
+                        className={`size-8 rounded-full flex items-center justify-center text-xs text-white overflow-hidden
+                            ${getAvatarBg(rel.targetPerson.gender)}`}
                       >
                         {rel.targetPerson.avatar_url ? (
                           <Image
@@ -497,7 +677,10 @@ export default function RelationshipManager({
                             height={32}
                           />
                         ) : (
-                          <DefaultAvatar gender={rel.targetPerson.gender} />
+                          <DefaultAvatar
+                            gender={rel.targetPerson.gender}
+                            size={32}
+                          />
                         )}
                       </div>
                       <div className="flex flex-col">
@@ -516,10 +699,10 @@ export default function RelationshipManager({
                         )}
                       </div>
                     </button>
-                    {isAdmin && rel.direction !== "child_in_law" && (
+                    {canEdit && rel.direction !== "child_in_law" && (
                       <button
                         onClick={() => handleDelete(rel.id)}
-                        className="text-stone-300 hover:text-red-500 hover:bg-red-50 p-2 sm:p-2.5 rounded-lg transition-colors flex items-center justify-center ml-2 cursor-pointer"
+                        className="text-stone-300 hover:text-red-500 hover:bg-red-50 p-2 sm:p-2.5 rounded-lg transition-colors flex items-center justify-center ml-2"
                         title="Xóa mối quan hệ"
                         aria-label="Xóa mối quan hệ"
                       >
@@ -555,33 +738,72 @@ export default function RelationshipManager({
       })}
 
       {/* Add Button (Admin) */}
-      {isAdmin && !isAdding && !isAddingBulk && !isAddingSpouse && (
+      {canEdit && !isAdding && !isAddingBulk && !isAddingSpouse && (
         <div className="flex flex-col sm:flex-row gap-3 mt-4">
           <button
+            onClick={() => setIsAdding(true)}
+            className="flex-1 py-3 border-2 border-dashed border-stone-200 bg-stone-50/50 hover:bg-stone-50 rounded-xl sm:rounded-2xl text-stone-500 font-medium text-sm hover:border-amber-400 hover:text-amber-700 transition-all duration-200"
+          >
+            + Thêm Quan Hệ
+          </button>
+
+          <button
             onClick={() => setIsAddingBulk(true)}
-            className="flex-1 py-3 border-2 border-dashed border-stone-200 bg-stone-50/50 hover:bg-stone-50 rounded-xl sm:rounded-2xl text-stone-500 font-medium text-sm hover:border-sky-400 hover:text-sky-700 transition-all duration-200 cursor-pointer"
+            className="flex-1 py-3 border-2 border-dashed border-stone-200 bg-stone-50/50 hover:bg-stone-50 rounded-xl sm:rounded-2xl text-stone-500 font-medium text-sm hover:border-sky-400 hover:text-sky-700 transition-all duration-200"
           >
             + Thêm Con
           </button>
 
           <button
             onClick={() => setIsAddingSpouse(true)}
-            className="flex-1 py-3 border-2 border-dashed border-stone-200 bg-stone-50/50 hover:bg-stone-50 rounded-xl sm:rounded-2xl text-stone-500 font-medium text-sm hover:border-rose-400 hover:text-rose-700 transition-all duration-200 cursor-pointer"
+            className="flex-1 py-3 border-2 border-dashed border-stone-200 bg-stone-50/50 hover:bg-stone-50 rounded-xl sm:rounded-2xl text-stone-500 font-medium text-sm hover:border-rose-400 hover:text-rose-700 transition-all duration-200"
           >
             + Thêm Vợ/Chồng
           </button>
+        </div>
+      )}
 
+      {error && !isAdding && !isAddingBulk && !isAddingSpouse && (
+        <div className="mt-4 text-sm text-red-600 bg-red-50 p-3 rounded-xl border border-red-100 flex items-center justify-between gap-2 animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-2">
+            <svg
+              className="w-5 h-5 shrink-0 text-red-500"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+              />
+            </svg>
+            <span>{error}</span>
+          </div>
           <button
-            onClick={() => setIsAdding(true)}
-            className="flex-1 py-3 border-2 border-dashed border-stone-200 bg-stone-50/50 hover:bg-stone-50 rounded-xl sm:rounded-2xl text-stone-500 font-medium text-sm hover:border-amber-400 hover:text-amber-700 transition-all duration-200 cursor-pointer"
+            onClick={() => setError(null)}
+            className="text-red-400 hover:text-red-600 transition-colors p-1"
           >
-            + Thêm Mối Quan Hệ
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M6 18L18 6M6 6l12 12"
+              />
+            </svg>
           </button>
         </div>
       )}
 
       {/* Add Form (Admin) */}
-      {isAdmin && isAdding && (
+      {canEdit && isAdding && (
         <div className="mt-4 bg-stone-50/50 p-4 sm:p-5 rounded-xl border border-stone-200 shadow-sm">
           <h4 className="font-bold text-stone-800 mb-3 text-sm">
             Thêm Quan Hệ Mới
@@ -589,51 +811,64 @@ export default function RelationshipManager({
 
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-medium text-stone-500 mb-1">
+              <label
+                htmlFor="rel-note"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
                 Ghi chú mối quan hệ (tuỳ chọn)
               </label>
               <input
+                id="rel-note"
+                name="rel-note"
                 type="text"
                 placeholder="VD: Vợ cả, Vợ hai, Chồng trước..."
                 value={newRelNote}
                 onChange={(e) => setNewRelNote(e.target.value)}
-                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border mb-3 transition-colors"
+                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border mb-3 transition-colors"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-stone-500 mb-1">
+              <label
+                htmlFor="rel-direction"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
                 Loại quan hệ
               </label>
-              <div className="flex gap-2">
-                <select
-                  value={newRelDirection}
-                  onChange={(e) =>
-                    setNewRelDirection(
-                      e.target.value as "parent" | "child" | "spouse",
-                    )
-                  }
-                  className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border transition-colors"
-                >
-                  <option value="parent">Người này là Con của...</option>
-                  <option value="spouse">Người này là Vợ/Chồng của...</option>
-                  <option value="child">Người này là Bố/Mẹ của...</option>
-                </select>
-              </div>
+              <select
+                id="rel-direction"
+                name="rel-direction"
+                value={newRelDirection}
+                onChange={(e) =>
+                  setNewRelDirection(
+                    e.target.value as "parent" | "child" | "spouse",
+                  )
+                }
+                className="bg-white text-stone-900 block w-full max-w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border transition-colors"
+              >
+                <option value="parent">Người này là Con của...</option>
+                <option value="spouse">Người này là Vợ/Chồng của...</option>
+                <option value="child">Người này là Bố/Mẹ của...</option>
+              </select>
             </div>
 
             {/* Child Type Sub-selection */}
             {(newRelDirection === "child" || newRelDirection === "parent") && (
               <div>
-                <label className="block text-xs font-medium text-stone-500 mb-1">
+                <label
+                  htmlFor="rel-type"
+                  className="block text-xs font-medium text-stone-600 mb-1"
+                >
                   Chi tiết
                 </label>
                 <select
+                  id="rel-type"
+                  name="rel-type"
                   value={newRelType}
                   onChange={(e) =>
                     setNewRelType(e.target.value as RelationshipType)
                   }
-                  className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border transition-colors"
+                  className="bg-white text-stone-900 block w-full max-w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border transition-colors"
                 >
                   <option value="biological_child">Con ruột</option>
                   <option value="adopted_child">Con nuôi</option>
@@ -642,72 +877,76 @@ export default function RelationshipManager({
             )}
 
             <div>
-              <label className="block text-xs font-medium text-stone-500 mb-1">
+              <label
+                htmlFor="rel-search"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
                 Tìm người thân
               </label>
               <input
+                id="rel-search"
+                name="rel-search"
                 type="text"
                 placeholder="Nhập tên để tìm..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border transition-colors"
+                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-amber-500 focus:ring-amber-500 p-2 sm:p-2.5 border transition-colors"
               />
               {/* Search Results Dropdown */}
               {(searchResults.length > 0 ||
                 (searchTerm.length === 0 &&
                   !selectedTargetId &&
                   recentMembers.length > 0)) && (
-                <div className="mt-2 bg-white border border-stone-200 rounded-md shadow-lg max-h-[250px] overflow-y-auto">
-                  <div className="px-3 py-1.5 bg-stone-100 text-[10px] font-bold text-stone-500 uppercase tracking-wide border-b border-stone-200 sticky top-0 z-10">
-                    {searchResults.length > 0
-                      ? "Kết quả tìm kiếm"
-                      : "Thành viên vừa thêm gần đây"}
-                  </div>
-                  {(searchResults.length > 0
-                    ? searchResults
-                    : recentMembers
-                  ).map((p) => (
-                    <div
-                      key={p.id}
-                      onClick={() => {
-                        setSelectedTargetId(p.id);
-                        setSearchTerm(p.full_name);
-                        setSearchResults([]);
-                      }}
-                      className="px-3 py-2 hover:bg-amber-50 cursor-pointer text-sm flex items-center justify-between border-b border-stone-100 last:border-0"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`flex items-center justify-center text-[8px] font-bold w-3 h-3 rounded-full text-white shrink-0
-                               ${
-                                 p.gender === "male"
-                                   ? "bg-sky-500"
-                                   : p.gender === "female"
-                                     ? "bg-rose-500"
-                                     : "bg-stone-400"
-                               }`}
-                        >
-                          {p.gender === "male"
-                            ? "♂"
-                            : p.gender === "female"
-                              ? "♀"
-                              : "?"}
-                        </span>
-                        <span className="font-medium text-stone-800">
-                          {p.full_name}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-stone-400">
-                        {formatDisplayDate(
-                          p.birth_year,
-                          p.birth_month,
-                          p.birth_day,
-                        )}
-                      </span>
+                  <div className="mt-2 bg-white border border-stone-200 rounded-md shadow-lg max-h-[250px] overflow-y-auto">
+                    <div className="px-3 py-1.5 bg-stone-100 text-[10px] font-bold text-stone-500 uppercase tracking-wide border-b border-stone-200 sticky top-0 z-10">
+                      {searchResults.length > 0
+                        ? "Kết quả tìm kiếm"
+                        : "Thành viên vừa thêm gần đây"}
                     </div>
-                  ))}
-                </div>
-              )}
+                    {(searchResults.length > 0
+                      ? searchResults
+                      : recentMembers
+                    ).map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setSelectedTargetId(p.id);
+                          setSearchTerm(p.full_name);
+                          setSearchResults([]);
+                        }}
+                        className="px-3 py-2 hover:bg-amber-50 text-sm flex items-center justify-between border-b border-stone-100 last:border-0"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`flex items-center justify-center text-[8px] font-bold size-3 rounded-full text-white shrink-0
+                               ${p.gender === "male"
+                                ? "bg-sky-500"
+                                : p.gender === "female"
+                                  ? "bg-rose-500"
+                                  : "bg-stone-400"
+                              }`}
+                          >
+                            {p.gender === "male"
+                              ? "♂"
+                              : p.gender === "female"
+                                ? "♀"
+                                : "?"}
+                          </span>
+                          <span className="font-medium text-stone-800">
+                            {p.full_name}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-stone-400">
+                          {formatDisplayDate(
+                            p.birth_year,
+                            p.birth_month,
+                            p.birth_day,
+                          )}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               {selectedTargetId && (
                 <p className="text-xs text-green-600 mt-1">
                   Đã chọn: {searchTerm}
@@ -719,7 +958,7 @@ export default function RelationshipManager({
               <button
                 onClick={handleAddRelationship}
                 disabled={!selectedTargetId || processing}
-                className="flex-1 bg-amber-700 text-white py-2 sm:py-2.5 rounded-md sm:rounded-lg text-sm font-medium hover:bg-amber-800 disabled:opacity-50 transition-colors cursor-pointer"
+                className="flex-1 bg-amber-700 text-white py-2 sm:py-2.5 rounded-md sm:rounded-lg text-sm font-medium hover:bg-amber-800 disabled:opacity-50 transition-colors"
               >
                 {processing ? "Đang lưu..." : "Lưu"}
               </button>
@@ -730,7 +969,7 @@ export default function RelationshipManager({
                   setSearchTerm("");
                   setNewRelNote("");
                 }}
-                className="px-4 py-2 sm:py-2.5 bg-white border border-stone-300 text-stone-700 rounded-md sm:rounded-lg text-sm hover:bg-stone-50 transition-colors cursor-pointer"
+                className="px-4 py-2 sm:py-2.5 bg-white border border-stone-300 text-stone-700 rounded-md sm:rounded-lg text-sm hover:bg-stone-50 transition-colors"
               >
                 Hủy
               </button>
@@ -740,7 +979,7 @@ export default function RelationshipManager({
       )}
 
       {/* Bulk Add Children Form (Admin) */}
-      {isAdmin && isAddingBulk && (
+      {canEdit && isAddingBulk && (
         <div className="mt-4 bg-sky-50/50 p-4 sm:p-5 rounded-xl border border-sky-200 shadow-sm">
           <h4 className="font-bold text-sky-800 mb-3 text-sm">
             Thêm Nhanh Nhiều Con
@@ -748,13 +987,18 @@ export default function RelationshipManager({
 
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-stone-500 mb-1">
+              <label
+                htmlFor="bulk-spouse"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
                 Chọn người mẹ/cha còn lại
               </label>
               <select
+                id="bulk-spouse"
+                name="bulk-spouse"
                 value={selectedSpouseId}
                 onChange={(e) => setSelectedSpouseId(e.target.value)}
-                className="flex-1 bg-white text-stone-900 placeholder-stone-400 text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 p-2 sm:p-2.5 border transition-colors"
+                className="bg-white text-stone-900 block w-full max-w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 p-2 sm:p-2.5 border transition-colors"
               >
                 <option value="unknown">
                   Không rõ (hoặc Vợ/Chồng khác chưa thêm)
@@ -768,89 +1012,121 @@ export default function RelationshipManager({
               </select>
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-xs font-medium text-stone-500 mb-1">
+            <div className="space-y-3">
+              <label className="block text-xs font-medium text-stone-600 mb-1">
                 Danh sách các con
               </label>
               {bulkChildren.map((child, index) => (
-                <div key={index} className="flex gap-2 items-center">
-                  <span className="text-stone-400 text-xs w-4">
-                    {index + 1}.
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="Họ và tên..."
-                    value={child.name}
-                    onChange={(e) => {
-                      const newBulk = [...bulkChildren];
-                      newBulk[index].name = e.target.value;
-                      setBulkChildren(newBulk);
-                    }}
-                    className="flex-2 bg-white text-stone-900 placeholder-stone-400 text-sm rounded-md border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 p-2 border"
-                  />
-                  <select
-                    value={child.gender}
-                    onChange={(e) => {
-                      const newBulk = [...bulkChildren];
-                      newBulk[index].gender = e.target.value as
-                        | "male"
-                        | "female"
-                        | "other";
-                      setBulkChildren(newBulk);
-                    }}
-                    className="flex-1 bg-white text-stone-900 text-sm rounded-md border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 p-2 border"
-                  >
-                    <option value="male">Nam</option>
-                    <option value="female">Nữ</option>
-                    <option value="other">Khác</option>
-                  </select>
-                  <input
-                    type="number"
-                    placeholder="Năm sinh"
-                    value={child.birthYear}
-                    onChange={(e) => {
-                      const newBulk = [...bulkChildren];
-                      newBulk[index].birthYear = e.target.value;
-                      setBulkChildren(newBulk);
-                    }}
-                    className="flex-1 bg-white text-stone-900 placeholder-stone-400 text-sm rounded-md border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 p-2 border w-24"
-                  />
-                  <button
-                    onClick={() => {
-                      const newBulk = bulkChildren.filter(
-                        (_, i) => i !== index,
-                      );
-                      // Always keep at least one row
-                      if (newBulk.length === 0) {
-                        newBulk.push({
-                          name: "",
-                          gender: "male",
-                          birthYear: "",
-                          isProcessing: false,
-                        });
-                      }
-                      setBulkChildren(newBulk);
-                    }}
-                    className="text-stone-400 hover:text-red-500 p-2"
-                  >
-                    ✕
-                  </button>
+                <div
+                  key={index}
+                  className="bg-white rounded-xl border border-stone-200/80 p-3 sm:p-4 shadow-xs"
+                >
+                  {/* Header: number + remove */}
+                  <div className="flex items-center justify-between mb-2.5">
+                    <span className="text-xs font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-md">
+                      Con thứ {index + 1}
+                    </span>
+                    <button
+                      onClick={() => {
+                        const newBulk = bulkChildren.filter(
+                          (_, i) => i !== index,
+                        );
+                        if (newBulk.length === 0) {
+                          newBulk.push({
+                            name: "",
+                            gender: "male",
+                            birthYear: "",
+                            birthOrder: "1",
+                            isProcessing: false,
+                          });
+                        }
+                        setBulkChildren(newBulk);
+                      }}
+                      className="text-stone-400 hover:text-red-500 hover:bg-red-50 p-1.5 rounded-lg transition-colors text-xs"
+                      title="Xoá"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {/* Fields */}
+                  <div className="flex flex-wrap sm:flex-nowrap gap-2">
+                    <input
+                      id={`child-birth-order-${index}`}
+                      name={`child-birth-order-${index}`}
+                      type="number"
+                      placeholder="STT"
+                      min="1"
+                      value={child.birthOrder}
+                      onChange={(e) => {
+                        const newBulk = [...bulkChildren];
+                        newBulk[index].birthOrder = e.target.value;
+                        setBulkChildren(newBulk);
+                      }}
+                      className="w-14 shrink-0 text-center bg-stone-50 text-stone-900 placeholder-stone-400 text-sm rounded-lg border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 px-1 py-2 border transition-colors"
+                    />
+                    <input
+                      id={`child-name-${index}`}
+                      name={`child-name-${index}`}
+                      type="text"
+                      placeholder="Họ và tên *"
+                      value={child.name}
+                      onChange={(e) => {
+                        const newBulk = [...bulkChildren];
+                        newBulk[index].name = e.target.value;
+                        setBulkChildren(newBulk);
+                      }}
+                      className="w-[calc(100%-4rem)] sm:w-auto sm:flex-1 min-w-0 bg-stone-50 text-stone-900 placeholder-stone-400 text-sm rounded-lg border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 px-3 py-2 border transition-colors"
+                    />
+                    <select
+                      id={`child-gender-${index}`}
+                      name={`child-gender-${index}`}
+                      value={child.gender}
+                      onChange={(e) => {
+                        const newBulk = [...bulkChildren];
+                        newBulk[index].gender = e.target.value as
+                          | "male"
+                          | "female"
+                          | "other";
+                        setBulkChildren(newBulk);
+                      }}
+                      className="w-[calc(50%-0.25rem)] sm:w-24 shrink-0 bg-stone-50 text-stone-900 text-sm rounded-lg border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 px-2 py-2 border transition-colors"
+                    >
+                      <option value="male">Nam</option>
+                      <option value="female">Nữ</option>
+                      <option value="other">Khác</option>
+                    </select>
+                    <input
+                      id={`child-birth-year-${index}`}
+                      name={`child-birth-year-${index}`}
+                      type="number"
+                      placeholder="Năm sinh"
+                      value={child.birthYear}
+                      onChange={(e) => {
+                        const newBulk = [...bulkChildren];
+                        newBulk[index].birthYear = e.target.value;
+                        setBulkChildren(newBulk);
+                      }}
+                      className="w-[calc(50%-0.25rem)] sm:w-24 shrink-0 bg-stone-50 text-stone-900 placeholder-stone-400 text-sm rounded-lg border-stone-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 px-2 py-2 border transition-colors"
+                    />
+                  </div>
                 </div>
               ))}
 
               <button
                 onClick={() => {
+                  const nextOrder = String(bulkChildren.length + 1);
                   setBulkChildren([
                     ...bulkChildren,
                     {
                       name: "",
                       gender: "male",
                       birthYear: "",
+                      birthOrder: nextOrder,
                       isProcessing: false,
                     },
                   ]);
                 }}
-                className="text-sky-600 text-xs font-semibold hover:text-sky-800 mt-2 px-6"
+                className="w-full py-2.5 border-2 border-dashed border-sky-200 bg-sky-50/50 hover:bg-sky-50 rounded-xl text-sky-600 text-xs font-semibold hover:border-sky-300 transition-all"
               >
                 + Thêm dòng
               </button>
@@ -862,7 +1138,7 @@ export default function RelationshipManager({
                 disabled={
                   processing || bulkChildren.every((c) => c.name.trim() === "")
                 }
-                className="flex-1 bg-sky-600 text-white py-2 sm:py-2.5 rounded-md sm:rounded-lg text-sm font-medium hover:bg-sky-700 disabled:opacity-50 transition-colors cursor-pointer"
+                className="flex-1 bg-sky-600 text-white py-2 sm:py-2.5 rounded-md sm:rounded-lg text-sm font-medium hover:bg-sky-700 disabled:opacity-50 transition-colors"
               >
                 {processing ? "Đang lưu..." : "Lưu Tất Cả"}
               </button>
@@ -874,12 +1150,13 @@ export default function RelationshipManager({
                       name: "",
                       gender: "male",
                       birthYear: "",
+                      birthOrder: "1",
                       isProcessing: false,
                     },
                   ]);
                   setSelectedSpouseId("");
                 }}
-                className="px-4 py-2 sm:py-2.5 bg-white border border-stone-300 text-stone-700 rounded-md sm:rounded-lg text-sm hover:bg-stone-50 transition-colors cursor-pointer"
+                className="px-4 py-2 sm:py-2.5 bg-white border border-stone-300 text-stone-700 rounded-md sm:rounded-lg text-sm hover:bg-stone-50 transition-colors"
               >
                 Hủy
               </button>
@@ -889,7 +1166,7 @@ export default function RelationshipManager({
       )}
 
       {/* Quick Add Spouse Form (Admin) */}
-      {isAdmin && isAddingSpouse && (
+      {canEdit && isAddingSpouse && (
         <div className="mt-4 bg-rose-50/50 p-4 sm:p-5 rounded-xl border border-rose-200 shadow-sm">
           <h4 className="font-bold text-rose-800 mb-3 text-sm">
             Thêm Nhanh Vợ/Chồng
@@ -897,41 +1174,56 @@ export default function RelationshipManager({
 
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-medium text-rose-700 mb-1">
-                Họ và Tên *
+              <label
+                htmlFor="spouse-name"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
+                Họ và Tên <span className="text-red-500">*</span>
               </label>
               <input
+                id="spouse-name"
+                name="spouse-name"
                 type="text"
                 placeholder="Nhập họ và tên..."
                 value={newSpouseName}
                 onChange={(e) => setNewSpouseName(e.target.value)}
-                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-rose-500 focus:ring-rose-500 p-2 sm:p-2.5 border transition-colors"
+                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-rose-500 focus:ring-rose-500 p-2 sm:p-2.5 border transition-colors"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-rose-700 mb-1">
+              <label
+                htmlFor="spouse-birth-year"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
                 Năm sinh (Tuỳ chọn)
               </label>
               <input
+                id="spouse-birth-year"
+                name="spouse-birth-year"
                 type="number"
                 placeholder="VD: 1980"
                 value={newSpouseBirthYear}
                 onChange={(e) => setNewSpouseBirthYear(e.target.value)}
-                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-rose-500 focus:ring-rose-500 p-2 sm:p-2.5 border transition-colors"
+                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-rose-500 focus:ring-rose-500 p-2 sm:p-2.5 border transition-colors"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-rose-700 mb-1">
+              <label
+                htmlFor="spouse-note"
+                className="block text-xs font-medium text-stone-600 mb-1"
+              >
                 Ghi chú mối quan hệ (Ví dụ: Vợ cả, Chồng thứ...)
               </label>
               <input
+                id="spouse-note"
+                name="spouse-note"
                 type="text"
                 placeholder="Tuỳ chọn..."
                 value={newSpouseNote}
                 onChange={(e) => setNewSpouseNote(e.target.value)}
-                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-md sm:rounded-lg border-stone-300 shadow-sm focus:border-rose-500 focus:ring-rose-500 p-2 sm:p-2.5 border transition-colors"
+                className="bg-white text-stone-900 placeholder-stone-400 block w-full text-sm rounded-lg border-stone-300 shadow-sm focus:border-rose-500 focus:ring-rose-500 p-2 sm:p-2.5 border transition-colors"
               />
             </div>
 
@@ -949,7 +1241,7 @@ export default function RelationshipManager({
               <button
                 onClick={handleQuickAddSpouse}
                 disabled={!newSpouseName.trim() || processing}
-                className="flex-1 bg-rose-600 text-white py-2 sm:py-2.5 rounded-md sm:rounded-lg text-sm font-medium hover:bg-rose-700 disabled:opacity-50 transition-colors cursor-pointer"
+                className="flex-1 bg-rose-600 text-white py-2 sm:py-2.5 rounded-md sm:rounded-lg text-sm font-medium hover:bg-rose-700 disabled:opacity-50 transition-colors"
               >
                 {processing ? "Đang lưu..." : "Lưu"}
               </button>
@@ -960,11 +1252,29 @@ export default function RelationshipManager({
                   setNewSpouseBirthYear("");
                   setNewSpouseNote("");
                 }}
-                className="px-4 py-2 sm:py-2.5 bg-white border border-stone-300 text-stone-700 rounded-md sm:rounded-lg text-sm hover:bg-stone-50 transition-colors cursor-pointer"
+                className="px-4 py-2 sm:py-2.5 bg-white border border-stone-300 text-stone-700 rounded-md sm:rounded-lg text-sm hover:bg-stone-50 transition-colors"
               >
                 Hủy
               </button>
             </div>
+            {error && (
+              <div className="mt-2 text-sm text-red-600 bg-red-50 p-3 rounded-lg border border-red-100 flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
+                <svg
+                  className="w-4 h-4 shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                {error}
+              </div>
+            )}
           </div>
         </div>
       )}
